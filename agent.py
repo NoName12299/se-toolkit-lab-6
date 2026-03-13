@@ -7,6 +7,11 @@ import argparse
 from pathlib import Path
 import traceback
 
+LMS_API_KEY = os.getenv('LMS_API_KEY')
+if not LMS_API_KEY:
+    print("Error: Missing LMS_API_KEY in environment", file=sys.stderr)
+    sys.exit(1)
+AGENT_API_BASE_URL = os.getenv('AGENT_API_BASE_URL', 'http://localhost:42002')
 load_dotenv('.env.agent.secret')
 REQUIRED_VARS = ['LLM_API_KEY', 'LLM_API_BASE', 'LLM_MODEL']
 config = {}
@@ -46,6 +51,31 @@ def list_files(path):
         return '\n'.join(items) if items else "(empty)"
     except Exception as e:
         return f"Error listing files: {str(e)}"
+def query_api(method, path, body=None):
+    """Call the backend API"""
+    url = f"{AGENT_API_BASE_URL.rstrip('/')}{path}"
+    headers = {
+        "Authorization": f"Bearer {LMS_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    try:
+        if method.upper() == 'GET':
+            response = requests.get(url, headers=headers, timeout=10)
+        elif method.upper() == 'POST':
+            response = requests.post(url, headers=headers, 
+                                   json=json.loads(body) if body else None, 
+                                   timeout=10)
+        else:
+            return f"Error: Unsupported method {method}"
+        return json.dumps({
+            "status_code": response.status_code,
+            "body": response.text
+        })
+    except Exception as e:
+        return json.dumps({
+            "status_code": 500,
+            "body": f"Error: {str(e)}"
+        })
 TOOLS = [
     {
         "type": "function",
@@ -80,6 +110,32 @@ TOOLS = [
                 "required": ["path"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_api",
+            "description": "Query the backend API. Use for system data like item counts, scores, or to check API endpoints.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "method": {
+                        "type": "string",
+                        "enum": ["GET", "POST"],
+                        "description": "HTTP method"
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "API path, e.g., /items/ or /analytics/scores?lab=lab-01"
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "JSON body for POST requests (optional)"
+                    }
+                },
+                "required": ["method", "path"]
+            }
+        }
     }
 ]
 def call_llm(messages):
@@ -110,6 +166,12 @@ def execute_tool(tool_call):
         result = read_file(args['path'])
     elif name == 'list_files':
         result = list_files(args['path'])
+    elif name == 'query_api':
+        result = query_api(
+            args['method'],
+            args['path'],
+            args.get('body')
+        )
     else:
         result = f"Error: Unknown tool '{name}'"
     return {
@@ -122,11 +184,13 @@ def run_agent(question):
         {
             "role": "system",
             "content": (
-                "You are a documentation assistant. Answer questions using the project wiki. "
-                "First use list_files to see what's in the wiki directory. "
-                "Then use read_file on relevant files. "
-                "When you find the answer, include the source reference (file path and section). "
-                "Format: wiki/filename.md#section-name"
+    "You are a system assistant. Answer questions using:\n"
+    "1. Wiki documentation - use read_file/list_files\n"
+    "2. Source code - use read_file on backend/*.py\n"
+    "3. System data - use query_api to get live data\n\n"
+    "For static facts (framework, ports) check source code.\n"
+    "For dynamic data (item counts, scores) use query_api.\n"
+    "If query_api returns an error, read the error and debug."
             )
         },
         {
