@@ -1,186 +1,108 @@
+#!/usr/bin/env python
+"""
+agent.py - CLI tool that calls Qwen LLM on VM and returns JSON response.
+Task 1: Call an LLM from Code
+"""
+
 import os
 import sys
 import json
 import requests
 from dotenv import load_dotenv
 import argparse
-from pathlib import Path
-import traceback
 
-load_dotenv('.env.agent.secret')
-REQUIRED_VARS = ['LLM_API_KEY', 'LLM_API_BASE', 'LLM_MODEL']
-config = {}
-missing = []
-for var in REQUIRED_VARS:
-    value = os.getenv(var)
-    if not value:
-        missing.append(var)
-    config[var.lower()] = value
-if missing:
-    print(f"Error: Missing required environment variables: {', '.join(missing)}", file=sys.stderr)
-    sys.exit(1)
-PROJECT_ROOT = Path(__file__).parent.absolute()
-MAX_TOOL_CALLS = 10
-def read_file(path):
-    try:
-        full_path = (PROJECT_ROOT / path).resolve()
-        if not str(full_path).startswith(str(PROJECT_ROOT)):
-            return f"Error: Access denied - path outside project: {path}"
-        if not full_path.exists():
-            return f"Error: File not found: {path}"
-        if not full_path.is_file():
-            return f"Error: Not a file: {path}"
-        return full_path.read_text(encoding='utf-8')
-    except Exception as e:
-        return f"Error reading file: {str(e)}"
-def list_files(path):
-    try:
-        full_path = (PROJECT_ROOT / path).resolve()
-        if not str(full_path).startswith(str(PROJECT_ROOT)):
-            return f"Error: Access denied - path outside project: {path}"
-        if not full_path.exists():
-            return f"Error: Path not found: {path}"
-        if not full_path.is_dir():
-            return f"Error: Not a directory: {path}"
-        items = sorted([p.name for p in full_path.iterdir()])
-        return '\n'.join(items) if items else "(empty)"
-    except Exception as e:
-        return f"Error listing files: {str(e)}"
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "read_file",
-            "description": "Read a file from the project repository",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Relative path from project root"
-                    }
-                },
-                "required": ["path"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "list_files",
-            "description": "List files and directories at a given path",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Relative directory path from project root"
-                    }
-                },
-                "required": ["path"]
-            }
-        }
-    }
-]
-def call_llm(messages):
+
+def load_config():
+    """Load configuration from .env.agent.secret"""
+    # Load environment variables from .env.agent.secret
+    load_dotenv('.env.agent.secret')
+    required_vars = ['LLM_API_KEY', 'LLM_API_BASE', 'LLM_MODEL']
+    config = {}
+    missing = []
+    for var in required_vars:
+        value = os.getenv(var)
+        if not value:
+            missing.append(var)
+        config[var.lower()] = value
+    if missing:
+        print(f"Error: Missing required environment variables: {', '.join(missing)}", 
+              file=sys.stderr)
+        print("Please create .env.agent.secret with:", file=sys.stderr)
+        print("LLM_API_KEY=my-secret-qwen-key", file=sys.stderr)
+        print("LLM_API_BASE=http://<your-vm-ip>:42005/v1", file=sys.stderr)
+        print("LLM_MODEL=qwen3-coder-plus", file=sys.stderr)
+        sys.exit(1)
+    return config
+def call_qwen(question: str, config: dict) -> dict:
+    """
+    Call Qwen API on VM and return the response.
+    Args:
+        question: User's question
+        config: Configuration with api_key, api_base, model
+    Returns:
+        Dict with 'answer' and 'tool_calls'
+    """
     headers = {
         "Authorization": f"Bearer {config['api_key']}",
         "Content-Type": "application/json"
     }
-    api_base = config['api_base'].rstrip('/')
-    url = f"{api_base}/chat/completions"
     payload = {
         "model": config['model'],
-        "messages": messages,
-        "tools": TOOLS,
-        "tool_choice": "auto",
-        "temperature": 0.7
+        "messages": [
+            {
+                "role": "user",
+                "content": question
+            }
+        ],
+        "temperature": 0.7,
+        "max_tokens": 500
     }
+    # Build API URL (Qwen уже имеет /v1 в базовом URL)
+    api_base = config['api_base'].rstrip('/')
+    url = f"{api_base}/chat/completions"
+    # Print debug info to stderr (not stdout!)
+    print(f"Calling Qwen on VM at: {url}", file=sys.stderr)
+    print(f"Model: {config['model']}", file=sys.stderr)
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=30)
         response.raise_for_status()
-        return response.json()
-    except Exception as e:
-        print(f"Error calling LLM: {e}", file=sys.stderr)
-        sys.exit(1)
-def execute_tool(tool_call):
-    name = tool_call['function']['name']
-    args = json.loads(tool_call['function']['arguments'])
-    if name == 'read_file':
-        result = read_file(args['path'])
-    elif name == 'list_files':
-        result = list_files(args['path'])
-    else:
-        result = f"Error: Unknown tool '{name}'"
-    return {
-        "role": "tool",
-        "tool_call_id": tool_call['id'],
-        "content": result
-    }
-def run_agent(question):
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are a documentation assistant. Answer questions using the project wiki. "
-                "First use list_files to see what's in the wiki directory. "
-                "Then use read_file on relevant files. "
-                "When you find the answer, include the source reference (file path and section). "
-                "Format: wiki/filename.md#section-name"
-            )
-        },
-        {
-            "role": "user",
-            "content": question
-        }
-    ]
-    tool_calls_log = []
-    for _ in range(MAX_TOOL_CALLS):
-        response = call_llm(messages)
-        choice = response['choices'][0]
-        message = choice['message']
-        if 'tool_calls' not in message or not message['tool_calls']:
-            answer = message.get('content', '')
-            source = extract_source(answer)
-            output = {
-                "answer": answer,
-                "source": source,
-                "tool_calls": tool_calls_log
-            }
-            print(json.dumps(output, ensure_ascii=False))
-            return
-        messages.append(message)
-        for tool_call in message['tool_calls']:
-            tool_result = execute_tool(tool_call)
-            messages.append(tool_result)
-            tool_calls_log.append({
-                "tool": tool_call['function']['name'],
-                "args": json.loads(tool_call['function']['arguments']),
-                "result": tool_result['content']
-            })
-    answer = "Maximum tool calls reached without final answer"
-    output = {
-        "answer": answer,
-        "source": "",
-        "tool_calls": tool_calls_log
-    }
-    print(json.dumps(output, ensure_ascii=False))
-def extract_source(text):
-    import re
-    match = re.search(r'(wiki/[a-zA-Z0-9_-]+\.md(?:#[a-zA-Z0-9_-]+)?)', text)
-    return match.group(1) if match else ""
-def main():
-    parser = argparse.ArgumentParser(description='Documentation agent with tools')
-    parser.add_argument('question', help='Question about the project')
-    args = parser.parse_args()
-    try:
-        run_agent(args.question)
-    except Exception as e:
-        print(json.dumps({
-            "answer": f"Error: {str(e)}",
-            "source": "",
+        data = response.json()
+        # Извлекаем ответ из Qwen (OpenAI-совместимый формат)
+        answer = data['choices'][0]['message']['content']
+        # Для Task 1 tool_calls всегда пустой массив
+        return {
+            "answer": answer.strip(),
             "tool_calls": []
-        }, ensure_ascii=False))
+        }
+    except requests.exceptions.ConnectionError:
+        print(f"Error: Cannot connect to Qwen at {url}", file=sys.stderr)
+        print("Make sure:", file=sys.stderr)
+        print("1. Qwen container is running on VM", file=sys.stderr)
+        print("2. VM IP is correct in .env.agent.secret", file=sys.stderr)
+        print("3. Port 42005 is open", file=sys.stderr)
         sys.exit(1)
+    except requests.exceptions.RequestException as e:
+        print(f"Error calling Qwen API: {e}", file=sys.stderr)
+        if hasattr(e, 'response') and e.response:
+            print(f"Response: {e.response.text}", file=sys.stderr)
+        sys.exit(1)
+    except (KeyError, json.JSONDecodeError) as e:
+        print(f"Error parsing Qwen response: {e}", file=sys.stderr)
+        print(f"Raw response: {response.text if 'response' in locals() else 'N/A'}", file=sys.stderr)
+        sys.exit(1)
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Call Qwen LLM on VM with a question')
+    parser.add_argument('question', help='Question to ask the LLM')
+    args = parser.parse_args()
+    # Load configuration
+    config = load_config()
+    # Call Qwen
+    result = call_qwen(args.question, config)
+    # Output only JSON to stdout (all debug goes to stderr)
+    print(json.dumps(result, ensure_ascii=False))
+
+
 if __name__ == '__main__':
     main()
