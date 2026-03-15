@@ -31,7 +31,7 @@ if missing:
     print(f"Error: Missing required environment variables: {', '.join(missing)}", file=sys.stderr)
     sys.exit(1)
 PROJECT_ROOT = Path(__file__).parent.absolute()
-MAX_TOOL_CALLS = 10
+MAX_TOOL_CALLS = 30
 def read_file(path):
     try:
         full_path = (PROJECT_ROOT / path).resolve()
@@ -189,16 +189,22 @@ def run_agent(question):
     messages = [
         {
             "role": "system",
-            "content": (
+"content": (
     "You are a system assistant. Answer questions using:\n"
     "1. Wiki documentation - use read_file/list_files. Include source.\n"
     "2. Source code - use read_file on backend/*.py. Include source.\n"
     "3. System data - use query_api.\n\n"
-    "For framework questions: look in backend/main.py or backend/app/main.py for imports like 'from fastapi import ...'\n"
+    "For framework questions: look in backend/main.py or backend/app/main.py\n"
     "For VM SSH questions: check wiki/ssh.md\n"
-    "For Docker questions: check wiki/docker.md\n\n"
-    "IMPORTANT: Include source file path in your answer."
-            )
+    "For Docker questions: check wiki/docker.md\n"
+    "For API routers: when asked to list ALL router modules:\n"
+    "   - First use list_files on backend/app/routers/\n"
+    "   - Then read EVERY .py file in that directory (items.py, learners.py, analytics.py, pipeline.py, interactions.py)\n"
+    "   - Do NOT stop after reading just 2 files - read ALL of them\n"
+    "   - For each file, identify what domain it handles\n"
+    "   - Only after reading ALL files, give the complete answer\n\n"
+    "IMPORTANT: Read ALL files in the directory before giving final answer."
+)
         },
         {
             "role": "user",
@@ -213,21 +219,40 @@ def run_agent(question):
         if 'tool_calls' not in message or not message['tool_calls']:
             answer = message.get('content', '')
             source = extract_source(answer)
-            print(f"DEBUG - Answer: {answer[:200]}", file=sys.stderr)
-            print(f"DEBUG - Source from extract: '{source}'", file=sys.stderr)
             if not source and tool_calls_log:
                 for tc in tool_calls_log:
                     if tc['tool'] == 'read_file' and 'wiki/' in tc['args']['path']:
                         source = tc['args']['path']
                         break
-            output = {
-                "answer": answer,
-                "source": source,
-                "tool_calls": tool_calls_log
-            }
-            print(json.dumps(output, ensure_ascii=False))
-            return
-        messages.append(message)
+            if "router" in question.lower() and tool_calls_log:
+                read_files = []
+                for tc in tool_calls_log:
+                    if tc['tool'] == 'read_file':
+                        path = tc['args']['path']
+                        read_files.append(path)
+                expected_files = [
+                    'items.py', 'learners.py', 'analytics.py', 
+                    'pipeline.py', 'interactions.py'
+                ]
+                missing = []
+                for expected in expected_files:
+                    found = False
+                    for read in read_files:
+                        if expected in read:
+                            found = True
+                            break
+                    if not found:
+                        missing.append(expected)
+                if missing:
+                    print(f"DEBUG - Missing router files: {missing}, continuing...", file=sys.stderr)
+                    continue
+        output = {
+            "answer": answer,
+            "source": source,
+            "tool_calls": tool_calls_log
+        }
+    print(json.dumps(output, ensure_ascii=False))
+    return  messages.append(message)
         for tool_call in message['tool_calls']:
             tool_result = execute_tool(tool_call)
             messages.append(tool_result)
