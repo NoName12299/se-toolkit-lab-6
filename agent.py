@@ -7,14 +7,23 @@ import argparse
 from pathlib import Path
 import traceback
 
+
+load_dotenv('.env.agent.secret')
+load_dotenv('.env.docker.secret')
+print("LMS_API_KEY:", os.getenv('LMS_API_KEY'), file=sys.stderr)
+print("LLM_API_KEY:", os.getenv('LLM_API_KEY'), file=sys.stderr)
+print("AGENT_API_BASE_URL:", os.getenv('AGENT_API_BASE_URL', 'not set'), file=sys.stderr)
 LMS_API_KEY = os.getenv('LMS_API_KEY')
 if not LMS_API_KEY:
     print("Error: Missing LMS_API_KEY in environment", file=sys.stderr)
     sys.exit(1)
 AGENT_API_BASE_URL = os.getenv('AGENT_API_BASE_URL', 'http://localhost:42002')
-load_dotenv('.env.agent.secret')
 REQUIRED_VARS = ['LLM_API_KEY', 'LLM_API_BASE', 'LLM_MODEL']
-config = {}
+config = {
+    'api_key': os.getenv('LLM_API_KEY'),
+    'api_base': os.getenv('LLM_API_BASE'),
+    'model': os.getenv('LLM_MODEL')
+}
 missing = []
 for var in REQUIRED_VARS:
     value = os.getenv(var)
