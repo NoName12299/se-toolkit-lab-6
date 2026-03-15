@@ -10,9 +10,6 @@ import traceback
 
 load_dotenv('.env.agent.secret')
 load_dotenv('.env.docker.secret')
-print("LMS_API_KEY:", os.getenv('LMS_API_KEY'), file=sys.stderr)
-print("LLM_API_KEY:", os.getenv('LLM_API_KEY'), file=sys.stderr)
-print("AGENT_API_BASE_URL:", os.getenv('AGENT_API_BASE_URL', 'not set'), file=sys.stderr)
 LMS_API_KEY = os.getenv('LMS_API_KEY')
 if not LMS_API_KEY:
     print("Error: Missing LMS_API_KEY in environment", file=sys.stderr)
@@ -194,12 +191,13 @@ def run_agent(question):
             "role": "system",
             "content": (
     "You are a system assistant. Answer questions using:\n"
-    "1. Wiki documentation - use read_file/list_files\n"
-    "2. Source code - use read_file on backend/*.py\n"
-    "3. System data - use query_api to get live data\n\n"
-    "For static facts (framework, ports) check source code.\n"
-    "For dynamic data (item counts, scores) use query_api.\n"
-    "If query_api returns an error, read the error and debug."
+    "1. Wiki documentation - use read_file/list_files. Include source.\n"
+    "2. Source code - use read_file on backend/*.py. Include source.\n"
+    "3. System data - use query_api.\n\n"
+    "For framework questions: look in backend/main.py or backend/app/main.py for imports like 'from fastapi import ...'\n"
+    "For VM SSH questions: check wiki/ssh.md\n"
+    "For Docker questions: check wiki/docker.md\n\n"
+    "IMPORTANT: Include source file path in your answer."
             )
         },
         {
@@ -215,6 +213,13 @@ def run_agent(question):
         if 'tool_calls' not in message or not message['tool_calls']:
             answer = message.get('content', '')
             source = extract_source(answer)
+            print(f"DEBUG - Answer: {answer[:200]}", file=sys.stderr)
+            print(f"DEBUG - Source from extract: '{source}'", file=sys.stderr)
+            if not source and tool_calls_log:
+                for tc in tool_calls_log:
+                    if tc['tool'] == 'read_file' and 'wiki/' in tc['args']['path']:
+                        source = tc['args']['path']
+                        break
             output = {
                 "answer": answer,
                 "source": source,
@@ -240,8 +245,19 @@ def run_agent(question):
     print(json.dumps(output, ensure_ascii=False))
 def extract_source(text):
     import re
-    match = re.search(r'(wiki/[a-zA-Z0-9_-]+\.md(?:#[a-zA-Z0-9_-]+)?)', text)
-    return match.group(1) if match else ""
+    patterns = [
+        r'(wiki/[a-zA-Z0-9_-]+\.md(?:#[a-zA-Z0-9_-]+)?)',
+        r'`?([a-zA-Z0-9_/-]+\.(?:md|py))`?',
+        r'\((wiki/[a-zA-Z0-9_-]+\.md)\)',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            path = match.group(1)
+            if not path.startswith('wiki/') and path.endswith('.md'):
+                path = f'wiki/{path}'
+            return path
+    return ""
 def main():
     parser = argparse.ArgumentParser(description='Documentation agent with tools')
     parser.add_argument('question', help='Question about the project')
